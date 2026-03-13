@@ -144,8 +144,10 @@ class PaymentFlow:
             )
 
         data = resp.json()
-        logger.debug(f"Checkout 返回字段: {list(data.keys())}")
-        logger.debug(f"Checkout 返回内容: {json.dumps(data, ensure_ascii=False)[:1500]}")
+        logger.info(f"Checkout 返回字段: {list(data.keys())}")
+        logger.debug(f"Checkout 返回内容: {json.dumps(data, ensure_ascii=False)[:2000]}")
+        if data.get("client_secret"):
+            logger.info(f"client_secret: {data['client_secret'][:40]}...")
 
         # 保存 checkout_url 和 publishable_key
         self.checkout_url = data.get("url", "") or data.get("checkout_url", "")
@@ -348,14 +350,16 @@ class PaymentFlow:
     def fetch_payment_page_details(self, checkout_session_id: str) -> int:
         """
         多路获取 expected_amount，避免 confirm 金额校验不一致：
-        1) POST /v1/payment_pages/{cs_id}/init
-        2) POST /v1/payment_pages/{cs_id}
+        0) 从 checkout 响应中提取
+        1) POST /v1/payment_pages/{cs_id}/init  (带 key 参数)
+        2) POST /v1/payment_pages/{cs_id}       (带 key 参数)
         3) GET  /v1/elements/sessions?client_secret=...
         """
         logger.info("[支付 3.7/5] 获取 expected_amount...")
 
-        headers = {
+        headers_json = {
             "Authorization": f"Bearer {self.stripe_pk}",
+            "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json",
             "Origin": "https://js.stripe.com",
             "Referer": "https://js.stripe.com/",
@@ -412,59 +416,84 @@ class PaymentFlow:
 
         amount = 0
 
-        # 1) payment_pages/{cs}/init
-        init_url = f"https://api.stripe.com/v1/payment_pages/{checkout_session_id}/init"
-        init_resp = self.session.post(init_url, headers=headers, data={}, timeout=30)
-        if init_resp.status_code == 200:
-            try:
-                init_data = init_resp.json()
-                amount = _extract_amount(init_data)
-                logger.debug(f"payment_pages/init 返回字段: {list(init_data.keys())}")
-            except Exception:
-                amount = 0
+        # 0) 从 checkout 响应中提取金额
+        if self.checkout_data:
+            amount = _extract_amount(self.checkout_data)
             if amount:
-                logger.info(f"Expected amount (init): {amount}")
+                logger.info(f"Expected amount (checkout response): {amount}")
 
-        # 2) payment_pages/{cs}
+        # 1) payment_pages/{cs}/init (需要 key 参数)
+        if not amount:
+            init_url = f"https://api.stripe.com/v1/payment_pages/{checkout_session_id}/init"
+            init_form = {
+                "key": self.stripe_pk,
+                "locale": "auto",
+            }
+            try:
+                init_resp = self.session.post(init_url, headers=headers_json, data=init_form, timeout=30)
+                logger.debug(f"payment_pages/init 状态: {init_resp.status_code}")
+                if init_resp.status_code == 200:
+                    init_data = init_resp.json()
+                    amount = _extract_amount(init_data)
+                    logger.debug(f"payment_pages/init 返回字段: {list(init_data.keys())}")
+                    if amount:
+                        logger.info(f"Expected amount (init): {amount}")
+                else:
+                    logger.warning(f"payment_pages/init 返回 {init_resp.status_code}")
+                    logger.debug(f"payment_pages/init 错误: {init_resp.text[:500]}")
+            except Exception as e:
+                logger.warning(f"payment_pages/init 异常: {e}")
+
+        # 2) payment_pages/{cs} (需要 key 参数)
         if not amount:
             page_url = f"https://api.stripe.com/v1/payment_pages/{checkout_session_id}"
-            page_resp = self.session.post(page_url, headers=headers, data={}, timeout=30)
-            if page_resp.status_code == 200:
-                try:
+            page_form = {
+                "key": self.stripe_pk,
+                "locale": "auto",
+            }
+            try:
+                page_resp = self.session.post(page_url, headers=headers_json, data=page_form, timeout=30)
+                logger.debug(f"payment_pages 状态: {page_resp.status_code}")
+                if page_resp.status_code == 200:
                     page_data = page_resp.json()
                     amount = _extract_amount(page_data)
                     logger.debug(f"payment_pages 返回字段: {list(page_data.keys())}")
-                except Exception:
-                    amount = 0
-                if amount:
-                    logger.info(f"Expected amount (payment_page): {amount}")
-            else:
-                logger.warning(f"payment_pages 返回 {page_resp.status_code}")
+                    if amount:
+                        logger.info(f"Expected amount (payment_page): {amount}")
+                else:
+                    logger.warning(f"payment_pages 返回 {page_resp.status_code}")
+                    logger.debug(f"payment_pages 错误: {page_resp.text[:500]}")
+            except Exception as e:
+                logger.warning(f"payment_pages 异常: {e}")
 
-        # 3) elements/sessions
+        # 3) elements/sessions (需要 client_secret)
         if not amount and client_secret:
-            params = {"client_secret": client_secret, "type": "payment"}
-            ele_resp = self.session.get(
-                "https://api.stripe.com/v1/elements/sessions",
-                headers=headers,
-                params=params,
-                timeout=30,
-            )
-            if ele_resp.status_code == 200:
-                try:
+            headers_get = {k: v for k, v in headers_json.items() if k != "Content-Type"}
+            params = {
+                "client_secret": client_secret,
+                "type": "checkout",
+                "locale": "auto",
+                "key": self.stripe_pk,
+            }
+            try:
+                ele_resp = self.session.get(
+                    "https://api.stripe.com/v1/elements/sessions",
+                    headers=headers_get,
+                    params=params,
+                    timeout=30,
+                )
+                logger.debug(f"elements/sessions 状态: {ele_resp.status_code}")
+                if ele_resp.status_code == 200:
                     ele_data = ele_resp.json()
                     amount = _extract_amount(ele_data)
                     logger.debug(f"elements/sessions 返回字段: {list(ele_data.keys())}")
-                except Exception:
-                    amount = 0
-                if amount:
-                    logger.info(f"Expected amount (elements): {amount}")
-            else:
-                logger.warning(f"elements/sessions 返回 {ele_resp.status_code}")
-                try:
+                    if amount:
+                        logger.info(f"Expected amount (elements): {amount}")
+                else:
+                    logger.warning(f"elements/sessions 返回 {ele_resp.status_code}")
                     logger.debug(f"elements/sessions 错误: {ele_resp.text[:300]}")
-                except Exception:
-                    pass
+            except Exception as e:
+                logger.warning(f"elements/sessions 异常: {e}")
 
         if not amount:
             logger.warning("未能提取 expected_amount，回退为 0")
@@ -481,18 +510,18 @@ class PaymentFlow:
         logger.info("[支付 4/5] 确认支付...")
 
         fp = self.fingerprint.get_params()
+        expected = getattr(self, '_expected_amount', "0")
 
         # Stripe confirm 使用 application/x-www-form-urlencoded
         form_data = {
-            # 使用 tokenized payment method
             "payment_method": self.payment_method_id,
-            # Stripe 风控指纹
             "guid": fp["guid"],
             "muid": fp["muid"],
             "sid": fp["sid"],
-            # 预期金额 (从 payment_page 获取或默认 0)
-            "expected_amount": getattr(self, '_expected_amount', "0"),
+            "expected_amount": expected,
         }
+
+        logger.info(f"confirm 参数: expected_amount={expected}, pm={self.payment_method_id[:20]}...")
 
         headers = {
             "Authorization": f"Bearer {self.stripe_pk}",

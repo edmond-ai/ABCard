@@ -22,6 +22,118 @@ from logger import ResultStore
 
 OUTPUT_DIR = "test_outputs"
 
+import re as _re
+
+# 国家名/后缀 → (country_code, currency) 映射
+_COUNTRY_ALIAS = {
+    "UK": ("GB", "GBP"), "GB": ("GB", "GBP"), "England": ("GB", "GBP"), "United Kingdom": ("GB", "GBP"),
+    "US": ("US", "USD"), "USA": ("US", "USD"), "United States": ("US", "USD"),
+    "DE": ("DE", "EUR"), "Germany": ("DE", "EUR"),
+    "JP": ("JP", "JPY"), "Japan": ("JP", "JPY"),
+    "FR": ("FR", "EUR"), "France": ("FR", "EUR"),
+    "SG": ("SG", "SGD"), "Singapore": ("SG", "SGD"),
+    "HK": ("HK", "HKD"), "Hong Kong": ("HK", "HKD"),
+    "KR": ("KR", "KRW"), "Korea": ("KR", "KRW"),
+    "AU": ("AU", "AUD"), "Australia": ("AU", "AUD"),
+    "CA": ("CA", "CAD"), "Canada": ("CA", "CAD"),
+    "NL": ("NL", "EUR"), "Netherlands": ("NL", "EUR"),
+    "IT": ("IT", "EUR"), "Italy": ("IT", "EUR"),
+    "ES": ("ES", "EUR"), "Spain": ("ES", "EUR"),
+    "CH": ("CH", "CHF"), "Switzerland": ("CH", "CHF"),
+}
+
+
+def _parse_card_text(text: str) -> dict:
+    """从粘贴文本中解析卡号、有效期、CVV、账单地址"""
+    result = {}
+    lines = [l.strip() for l in text.strip().splitlines()]
+
+    # 卡号: 连续 13-19 位数字 (可有空格)
+    for line in lines:
+        digits_only = line.replace(" ", "").replace("-", "")
+        if digits_only.isdigit() and 13 <= len(digits_only) <= 19:
+            result["card_number"] = digits_only
+            break
+
+    # 有效期: MM/YY 或 MM/YYYY
+    for line in lines:
+        m = _re.search(r'\b(0[1-9]|1[0-2])\s*/\s*(\d{2,4})\b', line)
+        if m:
+            result["exp_month"] = m.group(1)
+            yr = m.group(2)
+            if len(yr) == 2:
+                yr = "20" + yr
+            result["exp_year"] = yr
+            break
+
+    # CVV: "CVV" 后面或下一行的 3-4 位数字
+    for i, line in enumerate(lines):
+        if _re.search(r'(?i)\b(?:cvv|cvc|安全码)\b', line):
+            m = _re.search(r'\b(\d{3,4})\b', line)
+            if m:
+                result["cvv"] = m.group(1)
+            elif i + 1 < len(lines):
+                m2 = _re.search(r'\b(\d{3,4})\b', lines[i + 1])
+                if m2:
+                    result["cvv"] = m2.group(1)
+            break
+
+    # 账单地址: "账单地址" 或 "billing address" 后面的地址行
+    addr_text = ""
+    for i, line in enumerate(lines):
+        if _re.search(r'(?i)账单地址|billing\s*address', line):
+            # 地址可能在同一行冒号后、或后续行
+            after = _re.sub(r'(?i)^.*?(账单地址|billing\s*address)\s*[:：]?\s*', '', line).strip()
+            if after and len(after) > 3:
+                addr_text = after
+            else:
+                # 跳过空行和"复制"标签，找到实际地址
+                for j in range(i + 1, min(i + 5, len(lines))):
+                    candidate = lines[j]
+                    if candidate and candidate not in ("复制", "copy", ""):
+                        addr_text = candidate
+                        break
+            break
+
+    if addr_text:
+        result["raw_address"] = addr_text
+        parts = [p.strip() for p in addr_text.split(",")]
+        if len(parts) >= 2:
+            # 尝试从最后一段获取国家
+            last = parts[-1].strip()
+            country_info = _COUNTRY_ALIAS.get(last)
+            if country_info:
+                result["country_code"] = country_info[0]
+                result["currency"] = country_info[1]
+                parts = parts[:-1]
+
+            # 尝试提取邮编 (支持英式如 N2 8EY、美式如 90001、日式如 150-0002)
+            for idx, p in enumerate(parts):
+                if _re.search(r'\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b', p.strip(), _re.IGNORECASE):
+                    result["postal_code"] = p.strip()
+                    parts.pop(idx)
+                    break
+                elif _re.search(r'\b\d{5}(-\d{4})?\b', p.strip()):
+                    result["postal_code"] = p.strip()
+                    parts.pop(idx)
+                    break
+                elif _re.search(r'\b\d{3}-\d{4}\b', p.strip()):
+                    result["postal_code"] = p.strip()
+                    parts.pop(idx)
+                    break
+
+            if len(parts) >= 1:
+                result["address_line1"] = parts[0]
+            if len(parts) >= 2:
+                result["address_state"] = parts[1]
+            # 更多部分合并到 address_line1
+            if len(parts) >= 3:
+                result["address_line1"] = ", ".join(parts[:-1])
+                result["address_state"] = parts[-1]
+
+    return result
+
+
 # 国家 → (code, currency, state, address, postal_code)
 COUNTRY_MAP = {
     "US - 美国": ("US", "USD", "California", "123 Main St", "90001"),
@@ -195,18 +307,77 @@ with cfg_col1:
 
 with cfg_col2:
     with st.expander("💰 账单地址", expanded=True):
-        country_label = st.selectbox("国家", list(COUNTRY_MAP.keys()), index=0)
+        # 如果有解析出的国家，自动选择对应国家
+        _parsed_cc = st.session_state.get("_parsed_country_code", "")
+        _default_country_idx = 0
+        if _parsed_cc:
+            for i, label in enumerate(COUNTRY_MAP.keys()):
+                if label.startswith(_parsed_cc):
+                    _default_country_idx = i
+                    break
+        country_label = st.selectbox("国家", list(COUNTRY_MAP.keys()), index=_default_country_idx)
         country_code, default_currency, default_state, default_addr, default_zip = COUNTRY_MAP[country_label]
+        # 覆盖: 如果解析出了值，优先使用
+        _p_addr = st.session_state.get("_parsed_address_line1", "")
+        _p_state = st.session_state.get("_parsed_address_state", "")
+        _p_zip = st.session_state.get("_parsed_postal_code", "")
+        _p_currency = st.session_state.get("_parsed_currency", "")
         bc1, bc2 = st.columns(2)
         billing_name = bc1.text_input("姓名", value="Test User")
-        currency = bc2.text_input("货币", value=default_currency)
+        currency = bc2.text_input("货币", value=_p_currency or default_currency)
         bc3, bc4, bc5 = st.columns(3)
-        address_line1 = bc3.text_input("地址", value=default_addr)
-        address_state = bc4.text_input("州/省", value=default_state)
-        postal_code = bc5.text_input("邮编", value=default_zip)
+        address_line1 = bc3.text_input("地址", value=_p_addr or default_addr)
+        address_state = bc4.text_input("州/省", value=_p_state or default_state)
+        postal_code = bc5.text_input("邮编", value=_p_zip or default_zip)
 
 if do_payment:
-    with st.expander("💳 信用卡 ⚠️ Live 模式 - 真实扣款", expanded=True):
+    with st.expander("� 粘贴卡片信息 (自动识别)", expanded=False):
+        paste_text = st.text_area(
+            "粘贴卡片/账单文本",
+            height=150,
+            placeholder="粘贴包含卡号、有效期、CVV、账单地址的文本，自动识别填充...\n\n例:\n4462 2200 0462 4356\n03/29\nCVV 173\n账单地址\nLangley House, London, England, N2 8EY, UK",
+            key="paste_card_text",
+        )
+        if paste_text and st.button("🔍 识别并填充", key="parse_btn"):
+            parsed = _parse_card_text(paste_text)
+            if parsed.get("card_number"):
+                st.session_state["_test_card_number"] = parsed["card_number"]
+            if parsed.get("exp_month"):
+                st.session_state["_test_exp_month"] = parsed["exp_month"]
+            if parsed.get("exp_year"):
+                st.session_state["_test_exp_year"] = parsed["exp_year"]
+            if parsed.get("cvv"):
+                st.session_state["_test_cvc"] = parsed["cvv"]
+            if parsed.get("address_line1"):
+                st.session_state["_parsed_address_line1"] = parsed["address_line1"]
+            if parsed.get("address_state"):
+                st.session_state["_parsed_address_state"] = parsed["address_state"]
+            if parsed.get("postal_code"):
+                st.session_state["_parsed_postal_code"] = parsed["postal_code"]
+            if parsed.get("country_code"):
+                st.session_state["_parsed_country_code"] = parsed["country_code"]
+                st.session_state["_parsed_currency"] = parsed.get("currency", "")
+            # 展示识别结果
+            filled = []
+            if parsed.get("card_number"):
+                filled.append(f"卡号: {parsed['card_number'][:4]} **** **** {parsed['card_number'][-4:]}")
+            if parsed.get("exp_month"):
+                filled.append(f"有效期: {parsed['exp_month']}/{parsed['exp_year']}")
+            if parsed.get("cvv"):
+                filled.append(f"CVV: ***")
+            if parsed.get("raw_address"):
+                filled.append(f"地址: {parsed['raw_address']}")
+            if parsed.get("country_code"):
+                filled.append(f"国家: {parsed['country_code']}")
+            if parsed.get("postal_code"):
+                filled.append(f"邮编: {parsed['postal_code']}")
+            if filled:
+                st.success("✅ 已识别: " + " | ".join(filled))
+            else:
+                st.warning("未能识别卡片信息，请检查文本格式")
+            st.rerun()
+
+    with st.expander("�💳 信用卡 ⚠️ Live 模式 - 真实扣款", expanded=True):
         TEST_CARDS = {
             "4242 4242 4242 4242 (Visa 标准)": ("4242424242424242", "123"),
             "4000 0000 0000 0002 (Visa 被拒)": ("4000000000000002", "123"),
