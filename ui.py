@@ -402,15 +402,73 @@ if "_pending_parse" in st.session_state:
 # ════════════════════════════════════════
 st.title("💳 Auto BindCard")
 
-col_step1, col_step2, col_step3, col_proxy = st.columns([1, 1, 1, 2])
-with col_step1:
-    do_register = st.checkbox("注册账号", value=True)
-with col_step2:
-    do_checkout = st.checkbox("创建 Checkout", value=True)
-with col_step3:
-    do_payment = st.checkbox("提交支付", value=True)
-with col_proxy:
+# ── 账号来源选择 ──
+_cred_files_all = []
+if os.path.exists(OUTPUT_DIR):
+    _cred_files_all = sorted(
+        [f for f in os.listdir(OUTPUT_DIR) if f.startswith("credentials_") and f.endswith(".json")],
+        reverse=True,
+    )
+
+acct_col, step_col, proxy_col = st.columns([2, 2, 2])
+with acct_col:
+    account_source = st.radio(
+        "账号来源",
+        ["🆕 新注册", "📂 选择已有账号", "🔑 手动输入 Token"],
+        index=1 if _cred_files_all else 0,
+        horizontal=True,
+    )
+    do_register = account_source == "🆕 新注册"
+
+with step_col:
+    sc1, sc2 = st.columns(2)
+    do_checkout = sc1.checkbox("创建 Checkout", value=True)
+    do_payment = sc2.checkbox("提交支付", value=True)
+
+with proxy_col:
     proxy = st.text_input("代理", placeholder="http://127.0.0.1:7897", key="w_proxy")
+
+# ── 已有账号选择 / Token 输入 ──
+cred_email = ""
+cred_session_token = ""
+cred_access_token = ""
+cred_device_id = ""
+use_existing_creds = not do_register
+
+if account_source == "📂 选择已有账号":
+    if _cred_files_all:
+        # 读取所有凭证并显示为友好列表
+        _cred_options = {}
+        for cf in _cred_files_all:
+            try:
+                with open(os.path.join(OUTPUT_DIR, cf), "r") as _f:
+                    _cd = json.load(_f)
+                _label = f"{_cd.get('email', '未知')}  ({cf.replace('credentials_', '').replace('.json', '')})"
+                _cred_options[_label] = _cd
+            except Exception:
+                pass
+        if _cred_options:
+            sel_label = st.selectbox("选择账号", list(_cred_options.keys()), key="w_acct_select")
+            _sel_data = _cred_options[sel_label]
+            cred_email = _sel_data.get("email", "")
+            cred_session_token = _sel_data.get("session_token", "")
+            cred_access_token = _sel_data.get("access_token", "")
+            cred_device_id = _sel_data.get("device_id", "")
+            with st.expander("查看凭证详情", expanded=False):
+                st.json({k: (v[:40] + "..." if isinstance(v, str) and len(v) > 50 else v) for k, v in _sel_data.items()})
+        else:
+            st.warning("未找到有效的凭证文件")
+    else:
+        st.warning("无已保存的账号，请先注册")
+
+elif account_source == "🔑 手动输入 Token":
+    tk_col1, tk_col2 = st.columns(2)
+    with tk_col1:
+        cred_access_token = st.text_input("access_token", placeholder="eyJhbGciOi...", type="password", key="w_manual_at")
+        cred_email = st.text_input("邮箱 (可选)", placeholder="user@example.com", key="w_manual_email")
+    with tk_col2:
+        cred_session_token = st.text_input("session_token (可选)", placeholder="可为空，仅 API 模式需要", type="password", key="w_manual_st")
+        cred_device_id = st.text_input("device_id (可选)", placeholder="留空自动生成", key="w_manual_did")
 
 # 支付模式选择
 if do_payment:
@@ -474,7 +532,7 @@ with cfg_col1:
         tc1, tc2, tc3 = st.columns(3)
         workspace_name = tc1.text_input("Workspace", value="Artizancloud")
         seat_quantity = tc2.number_input("席位数", min_value=2, max_value=50, value=5)
-        promo_campaign = tc3.text_input("活动 ID", value="team0dollar")
+        promo_campaign = tc3.text_input("活动 ID", value="team-1-month-free")
 
 with cfg_col2:
     with st.expander("💰 账单地址", expanded=True):
@@ -595,35 +653,6 @@ if do_payment:
         if card_number and card_number.startswith("4"):
             st.caption("⚠️ Live 模式下所有测试卡都会被拒绝，仅用于验证流程")
 
-# 跳过注册时可复用已有凭证
-use_existing_creds = st.checkbox("🔐 使用已有凭证（跳过注册）", value=not do_register)
-cred_email = ""
-cred_session_token = ""
-cred_access_token = ""
-cred_device_id = ""
-if use_existing_creds:
-    with st.expander("🔐 已有凭证配置", expanded=not do_register):
-        cred_files = []
-        if os.path.exists(OUTPUT_DIR):
-            cred_files = sorted(
-                [f for f in os.listdir(OUTPUT_DIR) if f.startswith("credentials_") and f.endswith(".json")],
-                reverse=True,
-            )
-
-        selected_cred = st.selectbox("凭证文件", ["手动输入"] + cred_files, index=1 if cred_files else 0)
-        loaded = {}
-        if selected_cred != "手动输入":
-            try:
-                with open(os.path.join(OUTPUT_DIR, selected_cred), "r") as f:
-                    loaded = json.load(f)
-            except Exception:
-                loaded = {}
-
-        cred_email = st.text_input("邮箱", value=loaded.get("email", ""))
-        cred_session_token = st.text_input("session_token", value=loaded.get("session_token", ""), type="password")
-        cred_access_token = st.text_input("access_token", value=loaded.get("access_token", ""), type="password")
-        cred_device_id = st.text_input("device_id", value=loaded.get("device_id", ""))
-
 st.divider()
 
 # ════════════════════════════════════════
@@ -736,8 +765,10 @@ with tab_run:
                 log_area.code("\n".join(st.session_state.log_buffer[-60:]), language="log")
             elif use_existing_creds and do_checkout:
                 # 跳过注册，直接使用已有凭证
-                if not cred_session_token or not cred_access_token:
-                    raise RuntimeError("跳过注册时必须提供 session_token 和 access_token")
+                if not cred_access_token:
+                    raise RuntimeError("必须提供 access_token")
+                if not cred_session_token:
+                    raise RuntimeError("必须提供 session_token（Checkout 需要此凭证设置 cookie）")
                 af = AuthFlow(cfg)
                 auth_result = af.from_existing_credentials(
                     session_token=cred_session_token,
