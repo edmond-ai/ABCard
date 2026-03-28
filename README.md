@@ -1,6 +1,5 @@
 # ABCard — ChatGPT Business / Plus 自动开通
 
-全自动注册 ChatGPT 账号 + 开通 Business 或 Plus 套餐（首月免费），支持 Web UI 操作。
 
 ## 展示
 
@@ -15,13 +14,7 @@
 
 ## 功能
 
-- **自动注册** — 临时邮箱创建、OTP 验证、账号注册一条龙
-- **首月免费** — Business (`team-1-month-free`) 或 Plus (`plus-1-month-free`)
-- **自动支付** — Xvfb + Chrome 自动填写 Stripe 表单、绕过 hCaptcha
-- **Web UI** — 粘贴卡片信息即可操作，支持选择已有账号或手动输入 Token
-- **计划选择** — 支持 Business (团队版 5席位 $0) 和 Plus (个人版 $0)
-- **兑换码管控** — Web UI 需兑换码才能使用，支持次数/有效期限制
-- **更多功能不一一列举**
+
 
 ## 工作原理
 
